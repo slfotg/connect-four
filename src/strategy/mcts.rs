@@ -23,21 +23,21 @@ impl Ord for OrderedF64 {
 #[derive(Default, Debug, Clone, Copy)]
 struct Score {
     score: f64,
-    visits: u64,
 }
 
 impl Score {
-    fn computed_score(&self) -> f64 {
-        if self.visits == 0 {
+    fn computed_score(&self, visits: u64) -> f64 {
+        if visits == 0 {
             f64::MAX
         } else {
-            self.score / self.visits as f64
+            (self.score / visits as f64 + 1.0) / 2.0
         }
     }
 }
 
 struct Node {
     state: GameState,
+    visits: u64,
     score: Score,
     children: Vec<(Column, Rc<RefCell<Node>>)>,
 }
@@ -63,6 +63,7 @@ impl Node {
                     c,
                     Rc::new(RefCell::new(Node {
                         state: s,
+                        visits: 0,
                         score: Score::default(),
                         children: vec![],
                     })),
@@ -72,27 +73,41 @@ impl Node {
         self.children = children;
     }
 
+    fn best_move(&self) -> (Column, Rc<RefCell<Node>>) {
+        self.children
+            .iter()
+            .max_by_key(|(_, c)| {
+                let c = c.borrow();
+                c.visits
+            })
+            .unwrap()
+            .clone()
+    }
+
     fn best_child(&self) -> (Column, Rc<RefCell<Node>>) {
         self.children
             .iter()
             .max_by_key(|(_, c)| {
                 let c = c.borrow();
                 let score = c.score.score;
-                let visits = c.score.visits as f64;
+                let visits = c.visits as f64;
                 if visits == 0.0 {
                     return OrderedF64(f64::MAX);
                 }
-                let parent_visits = self.score.visits as f64;
-                let exploration = 2.0 * (parent_visits.ln() / visits).sqrt();
-                OrderedF64((score / visits) + exploration)
+                let parent_visits = self.visits as f64;
+                let exploration = 1.8 * (parent_visits.ln() / visits).sqrt();
+                let adjusted = (score / visits + 1.0) / 2.0;
+                OrderedF64(adjusted + exploration)
             })
             .unwrap()
             .clone()
     }
 
-    fn simulate(&self) -> State {
+    fn simulate<T>(&self, agent: &T) -> State
+    where
+        T: Agent,
+    {
         let mut state = self.state;
-        let agent = RandomAgent::default();
         while !state.state.is_over() {
             let c = agent.next_move(&state);
             state.apply_move(c);
@@ -103,6 +118,7 @@ impl Node {
 
 struct SearchTree {
     root: Rc<RefCell<Node>>,
+    random_agent: RandomAgent,
 }
 
 impl SearchTree {
@@ -117,6 +133,7 @@ impl SearchTree {
                     c,
                     Rc::new(RefCell::new(Node {
                         state: s,
+                        visits: 0,
                         score: Score::default(),
                         children: vec![],
                     })),
@@ -125,84 +142,110 @@ impl SearchTree {
             .collect();
         let root = Rc::new(RefCell::new(Node {
             state,
+            visits: 0,
             score: Score::default(),
             children,
         }));
-        SearchTree { root }
+        SearchTree {
+            root,
+            random_agent: RandomAgent::default(),
+        }
     }
 
-    fn select(node: Rc<RefCell<Node>>) -> LinkedList<Rc<RefCell<Node>>> {
+    fn select(&self, node: &Rc<RefCell<Node>>) -> State {
         let mut nodes = LinkedList::new();
-        nodes.push_back(Rc::clone(&node));
-        let mut current = Rc::clone(&node);
+        nodes.push_back(Rc::clone(node));
+        let mut current = Rc::clone(node);
         while !current.borrow().is_leaf() {
             let (_, child) = current.borrow().best_child();
             nodes.push_back(Rc::clone(&child));
             current = child;
         }
-        if current.borrow().score.visits != 0 && !current.borrow().is_terminal() {
+        if current.borrow().visits != 0 && !current.borrow().is_terminal() {
             current.borrow_mut().expand();
             let (_, child) = current.borrow().best_child();
+            current = Rc::clone(&child);
             nodes.push_back(Rc::clone(&child));
         }
-        nodes
+        let state = current.borrow().simulate(&self.random_agent);
+
+        let mut score = match state {
+            State::Draw => 0.0,
+            State::Win(player) => {
+                if player == node.borrow().state.current_player {
+                    -1.0
+                } else {
+                    1.0
+                }
+            }
+            _ => unreachable!(),
+        };
+        for node in nodes {
+            node.borrow_mut().score.score += score;
+            node.borrow_mut().visits += 1;
+            score = -score;
+        }
+        state
     }
 }
 
 pub struct MctsAgent {
     iterations: usize,
-}
-
-impl Default for MctsAgent {
-    fn default() -> Self {
-        Self {
-            iterations: 500_000,
-        }
-    }
+    search_tree: RefCell<SearchTree>,
 }
 
 impl MctsAgent {
-    pub fn new(iterations: usize) -> Self {
-        Self { iterations }
+    pub fn new(iterations: usize, game_state: GameState) -> Self {
+        Self {
+            iterations,
+            search_tree: RefCell::new(SearchTree::new(game_state)),
+        }
     }
 }
 
 impl Agent for MctsAgent {
     fn next_move(&self, board: &GameState) -> Column {
-        let search_tree = SearchTree::new(*board);
-        for _ in 0..self.iterations {
-            let nodes = SearchTree::select(search_tree.root.clone());
-            let leaf = nodes.back().unwrap().clone();
-            let winner = leaf.borrow().simulate();
-
-            for node in nodes {
-                let score = match winner {
-                    State::Win(player) => {
-                        if player == node.borrow().state.current_player {
-                            0.0
-                        } else {
-                            1.0
-                        }
-                    }
-                    State::Draw => 0.5,
-                    State::InProgress => unreachable!(),
-                };
-                node.borrow_mut().score.score += score;
-                node.borrow_mut().score.visits += 1;
+        if *board != self.search_tree.borrow().root.borrow().state {
+            let mut new_root = None;
+            for (_, child) in self.search_tree.borrow().root.borrow().children.iter() {
+                if child.borrow().state == *board {
+                    new_root = Some(Rc::clone(child));
+                    break;
+                }
+            }
+            if let Some(new_root) = new_root {
+                self.search_tree.borrow_mut().root = new_root;
+            } else {
+                println!("state not found. resetting search tree");
+                *self.search_tree.borrow_mut() = SearchTree::new(*board);
             }
         }
-        let borrowed = search_tree.root.borrow();
-        let scores = borrowed
-            .children
-            .iter()
-            .map(|(col, child)| {
-                let child = child.borrow();
-                let score = child.score;
-                (col, score.visits, score.computed_score())
-            })
-            .collect::<Vec<_>>();
-        println!("{:?}", scores);
-        let col = search_tree.root.borrow().best_child().0;
+
+        // let search_tree = SearchTree::new(*board);
+        let (col, new_root) = {
+            let search_tree = self.search_tree.borrow();
+            for _ in 0..self.iterations {
+                search_tree.select(&search_tree.root);
+            }
+            let borrowed = search_tree.root.borrow();
+            let scores = borrowed
+                .children
+                .iter()
+                .map(|(col, child)| {
+                    let v = Rc::clone(child);
+                    let child = child.borrow();
+                    let score = child.score;
+                    (col, child.visits, v, score.computed_score(child.visits))
+                })
+                .collect::<Vec<_>>();
+            for score in &scores {
+                println!("{:?} - {:8} - {:3.5}", score.0, score.1, score.3 * 100.0);
+            }
+            let (col, new_root) = search_tree.root.borrow().best_move();
+            (col, new_root)
+        };
+
+        self.search_tree.borrow_mut().root = new_root;
         col
     }
 }

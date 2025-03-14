@@ -11,7 +11,7 @@ fn main() {
     let mut player = Player::Yellow;
 
     let player1 = CliAgent::default();
-    let player2 = MctsAgent::default();
+    let player2 = MctsAgent::new(600_000, board);
 
     while !board.state.is_over() {
         let c = if player == Player::Yellow {
