@@ -3,6 +3,7 @@ use crate::state::GameState;
 
 pub mod cli;
 pub mod mcts;
+pub mod mcts2;
 pub mod random;
 
 pub trait Agent {

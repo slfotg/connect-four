@@ -2,7 +2,8 @@ use connect_four::board::Player;
 use connect_four::display::term::BoardAnsiWriter;
 use connect_four::state::GameState;
 use connect_four::strategy::cli::CliAgent;
-use connect_four::strategy::mcts::MctsAgent;
+use connect_four::strategy::mcts;
+use connect_four::strategy::mcts2;
 use connect_four::strategy::Agent;
 
 fn main() {
@@ -10,8 +11,8 @@ fn main() {
     println!("{}", BoardAnsiWriter(board.board));
     let mut player = Player::Yellow;
 
-    let player1 = CliAgent::default();
-    let player2 = MctsAgent::new(600_000, board);
+    let player1 = mcts::MctsAgent::new(100_000, board);
+    let player2 = mcts2::MctsAgent::new(100_000, board);
 
     while !board.state.is_over() {
         let c = if player == Player::Yellow {
